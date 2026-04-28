@@ -1,0 +1,11 @@
+.git
+.venv
+.env
+.cache
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+tests/
+results*.json
+results*.csv
