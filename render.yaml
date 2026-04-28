@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: product-scraper-api
+    runtime: python
+    buildCommand: pip install -r requirements.txt && pip install -e . --no-deps && playwright install --with-deps chromium
+    startCommand: uvicorn product_scraper.api:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHONPATH
+        value: src
