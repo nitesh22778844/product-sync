@@ -43,7 +43,7 @@ class AmazonScraperFetcher(ProductFetcher):
         self.context = context
 
     async def search(self, query: str, limit: int = 3) -> list[Product]:
-        cached = get_cached(self.source, query)
+        cached = get_cached(self.source, query, self.settings)
         if cached is not None:
             logger.info("[amazon] cache hit for %r — returning %d cached products", query, len(cached))
             return [Product(**d) for d in cached]
@@ -69,7 +69,7 @@ class AmazonScraperFetcher(ProductFetcher):
                 logger.warning("Failed to build Product from card %d: %s", rank, exc)
 
         logger.info("[amazon] completed: %d products built for %r", len(products), query)
-        set_cache(self.source, query, [p.model_dump(mode="json") for p in products])
+        set_cache(self.source, query, [p.model_dump(mode="json") for p in products], self.settings)
         return products
 
     # ------------------------------------------------------------------

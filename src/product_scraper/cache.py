@@ -4,10 +4,9 @@ import hashlib
 import json
 import logging
 from datetime import date
-from pathlib import Path
 from typing import Optional
 
-from product_scraper.config import settings
+from product_scraper.config import Settings, settings
 
 logger = logging.getLogger(__name__)
 
@@ -17,14 +16,13 @@ def _key(source: str, query: str) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
-def _cache_path(source: str, query: str) -> Path:
-    return settings.cache_dir / f"{_key(source, query)}.json"
-
-
-def get_cached(source: str, query: str) -> Optional[list[dict]]:
-    if not settings.cache_enabled:
+def get_cached(
+    source: str, query: str, cache_settings: Optional[Settings] = None
+) -> Optional[list[dict]]:
+    s = cache_settings if cache_settings is not None else settings
+    if not s.cache_enabled:
         return None
-    path = _cache_path(source, query)
+    path = s.cache_dir / f"{_key(source, query)}.json"
     if not path.exists():
         return None
     try:
@@ -37,11 +35,14 @@ def get_cached(source: str, query: str) -> Optional[list[dict]]:
         return None
 
 
-def set_cache(source: str, query: str, data: list[dict]) -> None:
-    if not settings.cache_enabled:
+def set_cache(
+    source: str, query: str, data: list[dict], cache_settings: Optional[Settings] = None
+) -> None:
+    s = cache_settings if cache_settings is not None else settings
+    if not s.cache_enabled:
         return
-    settings.cache_dir.mkdir(parents=True, exist_ok=True)
-    path = _cache_path(source, query)
+    s.cache_dir.mkdir(parents=True, exist_ok=True)
+    path = s.cache_dir / f"{_key(source, query)}.json"
     entry = {
         "key": _key(source, query),
         "source": source,

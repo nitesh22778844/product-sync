@@ -4,6 +4,7 @@ from datetime import date
 import pytest
 
 from product_scraper.cache import _key, get_cached, set_cache
+from product_scraper.config import Settings
 
 
 # ──────────────────────────────────────────────
@@ -120,6 +121,22 @@ def test_set_cache_empty_list(cache_settings):
 # ──────────────────────────────────────────────
 # set_cache — disabled / directory creation
 # ──────────────────────────────────────────────
+
+def test_get_cached_bypasses_cache_when_settings_param_disabled(tmp_path):
+    """Passing cache_settings with cache_enabled=False ignores data already on disk."""
+    enabled = Settings(cache_enabled=True, cache_dir=tmp_path, headless=True, request_delay_seconds=0, max_retries=1)
+    set_cache("amazon", "laptop", [{"title": "Cached"}], enabled)
+    # Same cache_dir, but cache disabled — must return None
+    disabled = Settings(cache_enabled=False, cache_dir=tmp_path, headless=True, request_delay_seconds=0, max_retries=1)
+    assert get_cached("amazon", "laptop", disabled) is None
+
+
+def test_set_cache_noop_when_settings_param_disabled(tmp_path):
+    """Passing cache_settings with cache_enabled=False must not write any file."""
+    disabled = Settings(cache_enabled=False, cache_dir=tmp_path, headless=True, request_delay_seconds=0, max_retries=1)
+    set_cache("amazon", "laptop", [{"title": "X"}], disabled)
+    assert list(tmp_path.iterdir()) == []
+
 
 def test_set_cache_noop_when_disabled(mock_settings, tmp_path):
     # mock_settings: cache_enabled=False — no files should be written

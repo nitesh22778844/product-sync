@@ -269,6 +269,57 @@ async def test_search_500_detail_contains_error_message(client):
 # /search — no_cache flag
 # ──────────────────────────────────────────────
 
+async def test_no_cache_true_bypasses_fetcher_cache(client, tmp_path, monkeypatch):
+    """no_cache=true must cause fetchers to call get_cached with cache_enabled=False,
+    so a warm cache entry is ignored and live scraping is triggered instead."""
+    from product_scraper import cache as cache_mod
+    from product_scraper.config import Settings
+
+    # Write a stale cached entry under a known temp dir
+    cache_s = Settings(cache_enabled=True, cache_dir=tmp_path, headless=True, request_delay_seconds=0, max_retries=1)
+    cache_mod.set_cache("amazon", "laptop", [{"source": "amazon", "rank": 1, "title": "CACHED", "product_url": "https://amazon.in/p/1"}], cache_s)
+    cache_mod.set_cache("flipkart", "laptop", [], cache_s)
+
+    # Point the module-level settings at the same tmp dir so a normal (cached) request would hit it
+    monkeypatch.setattr(cache_mod, "settings", cache_s)
+    monkeypatch.setattr("product_scraper.config.settings", cache_s)
+
+    live_result = SearchResult(query="laptop", results=_six_products())
+
+    # With no_cache=true the orchestrator must be called with cache_enabled=False
+    captured: list[Settings] = []
+
+    def capture(s):
+        captured.append(s)
+        m = AsyncMock()
+        m.run = AsyncMock(return_value=live_result)
+        return m
+
+    with patch("product_scraper.api.Orchestrator", side_effect=capture):
+        resp = await client.get("/search", params={"q": "laptop", "no_cache": "true"})
+
+    assert resp.status_code == 200
+    assert captured, "Orchestrator was never called"
+    assert captured[0].cache_enabled is False, "cache_enabled must be False when no_cache=true"
+
+
+async def test_no_cache_false_uses_cache_enabled_settings(client):
+    """Without no_cache the orchestrator receives settings with cache_enabled=True."""
+    result = SearchResult(query="laptop", results=[])
+    captured: list = []
+
+    def capture(s):
+        captured.append(s)
+        m = AsyncMock()
+        m.run = AsyncMock(return_value=result)
+        return m
+
+    with patch("product_scraper.api.Orchestrator", side_effect=capture):
+        await client.get("/search", params={"q": "laptop"})
+
+    assert captured[0].cache_enabled is True
+
+
 async def test_search_no_cache_flag_accepted(client):
     result = SearchResult(query="HP laptop", results=_six_products())
     with _mock_orchestrator(result):

@@ -41,7 +41,7 @@ class FlipkartScraperFetcher(ProductFetcher):
         self._modal_dismissed = False
 
     async def search(self, query: str, limit: int = 3) -> list[Product]:
-        cached = get_cached(self.source, query)
+        cached = get_cached(self.source, query, self.settings)
         if cached is not None:
             logger.info("[flipkart] cache hit for %r — returning %d cached products", query, len(cached))
             return [Product(**d) for d in cached]
@@ -72,7 +72,7 @@ class FlipkartScraperFetcher(ProductFetcher):
                 logger.warning("Failed to build Flipkart product %d: %s", rank, exc)
 
         logger.info("[flipkart] completed: %d products built for %r", len(products), query)
-        set_cache(self.source, query, [p.model_dump(mode="json") for p in products])
+        set_cache(self.source, query, [p.model_dump(mode="json") for p in products], self.settings)
         return products
 
     # ------------------------------------------------------------------
