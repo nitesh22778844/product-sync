@@ -50,12 +50,12 @@ def product() -> Product:
 
 def test_payload_maps_all_fields(product):
     p = _build_payload(product)
-    assert p["Title__c"] == product.title
+    assert p["Name"] == product.title
     assert p["Source__c"] == "amazon"
     assert p["Rank__c"] == 1
     assert p["Current_Price__c"] == 1499.0
     assert p["Original_Price__c"] == 1999.0
-    assert p["Discount__c"] == 25.0
+    assert p["Discount__c"] == "25% off"
     assert p["Rating__c"] == 4.3
     assert p["Review_Count__c"] == 320
     assert '"Color"' in p["Specifications__c"]
@@ -111,7 +111,7 @@ async def test_query_records_exist(sf_settings, sf_client):
     async with httpx.AsyncClient(timeout=20) as client:
         resp = await client.get(
             f"{instance_url}/services/data/v57.0/query",
-            params={"q": "SELECT Id, Name, Title__c, CreatedDate FROM Product__c ORDER BY CreatedDate DESC LIMIT 5"},
+            params={"q": "SELECT Id, Name, CreatedDate FROM Product__c ORDER BY CreatedDate DESC LIMIT 5"},
             headers={"Authorization": f"Bearer {token}"},
         )
 
@@ -120,4 +120,4 @@ async def test_query_records_exist(sf_settings, sf_client):
     assert data["totalSize"] > 0, "No Product__c records found in org"
     print(f"\n[OK] {data['totalSize']} record(s) found:")
     for r in data["records"]:
-        print(f"  {r['Id']}  {r['Name']}  {r.get('Title__c', '')}  {r['CreatedDate']}")
+        print(f"  {r['Id']}  {r['Name']}  {r['CreatedDate']}")

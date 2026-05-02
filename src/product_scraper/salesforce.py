@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import time
 from typing import Any, Optional
 
@@ -16,16 +15,10 @@ logger = logging.getLogger(__name__)
 _TOKEN_EXPIRY_BUFFER = 60  # refresh token this many seconds before it expires
 
 
-def _parse_discount_pct(discount: Optional[str]) -> Optional[float]:
-    if not discount:
-        return None
-    m = re.search(r"(\d+(?:\.\d+)?)\s*%", discount)
-    return float(m.group(1)) if m else None
-
 
 def _build_payload(product: Product) -> dict[str, Any]:
     return {
-        "Title__c": product.title,
+        "Name": product.title,
         "Source__c": product.source,
         "Rank__c": product.rank,
         "Product_URL__c": product.product_url,
@@ -33,7 +26,7 @@ def _build_payload(product: Product) -> dict[str, Any]:
         "Model__c": product.model,
         "Current_Price__c": product.current_price.amount if product.current_price else None,
         "Original_Price__c": product.original_price.amount if product.original_price else None,
-        "Discount__c": _parse_discount_pct(product.discount),
+        "Discount__c": product.discount,
         "Rating__c": product.rating,
         "Review_Count__c": product.review_count,
         "Specifications__c": json.dumps(product.specifications) if product.specifications else None,
