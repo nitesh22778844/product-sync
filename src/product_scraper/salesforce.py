@@ -33,7 +33,7 @@ def _parse_discount_pct(discount: Optional[str]) -> Optional[float]:
 
 def _build_payload(product: Product) -> dict[str, Any]:
     return {
-        "Name": product.title,
+        "Title__c": product.title,
         "Source__c": product.source,
         "Rank__c": product.rank,
         "Product_URL__c": _clean_url(product.product_url),

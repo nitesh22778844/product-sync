@@ -50,7 +50,7 @@ def product() -> Product:
 
 def test_payload_maps_all_fields(product):
     p = _build_payload(product)
-    assert p["Name"] == product.title
+    assert p["Title__c"] == product.title
     assert p["Source__c"] == "amazon"
     assert p["Rank__c"] == 1
     assert p["Current_Price__c"] == 1499.0
