@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+import sys
 import time
 from typing import Optional
+
+# Playwright spawns a subprocess for the browser — requires ProactorEventLoop on Windows.
+# SelectorEventLoop (uvicorn's default in reload mode on Windows) raises NotImplementedError.
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 import uvicorn
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request, Response

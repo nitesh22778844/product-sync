@@ -50,7 +50,8 @@ def product() -> Product:
 
 def test_payload_maps_all_fields(product):
     p = _build_payload(product)
-    assert p["Title__c"] == product.title
+    assert p["Title__c"] == product.title  # title is short enough here
+    assert len(p["Title__c"]) <= 100
     assert p["Source__c"] == "amazon"
     assert p["Rank__c"] == 1
     assert p["Current_Price__c"] == 1499.0
@@ -69,6 +70,12 @@ def test_payload_nulls_for_missing_fields():
     assert p["Original_Price__c"] is None
     assert p["Discount__c"] is None
     assert p["Specifications__c"] is None
+
+
+def test_title_truncated_to_100():
+    long_title = "A" * 150
+    p = _build_payload(Product(source="flipkart", rank=1, title=long_title, product_url="https://flipkart.com/p/x"))
+    assert p["Title__c"] == "A" * 100
 
 
 def test_clean_url_strips_query_and_fragment():

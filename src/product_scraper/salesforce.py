@@ -33,7 +33,7 @@ def _parse_discount_pct(discount: Optional[str]) -> Optional[float]:
 
 def _build_payload(product: Product) -> dict[str, Any]:
     return {
-        "Title__c": product.title,
+        "Title__c": product.title[:100],  # SF Text(100) field
         "Source__c": product.source,
         "Rank__c": product.rank,
         "Product_URL__c": _clean_url(product.product_url),
@@ -114,7 +114,7 @@ class SalesforceClient:
                             product.rank,
                             product.source,
                             resp.status_code,
-                            resp.text[:200],
+                            resp.text[:500],
                         )
                 except Exception as exc:
                     failed += 1
