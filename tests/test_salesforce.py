@@ -8,6 +8,8 @@ import pytest
 
 from product_scraper.config import Settings
 from product_scraper.models import Price, Product
+from urllib.parse import quote
+
 from product_scraper.salesforce import SalesforceClient, _build_payload, _clean_url, _parse_discount_pct
 
 
@@ -51,7 +53,7 @@ def product() -> Product:
 def test_payload_maps_all_fields(product):
     p = _build_payload(product)
     assert p["Title__c"] == product.title  # title is short enough here
-    assert len(p["Title__c"]) <= 100
+    assert len(p["Title__c"]) <= 200
     assert p["Source__c"] == "amazon"
     assert p["Rank__c"] == 1
     assert p["Current_Price__c"] == 1499.0
@@ -72,10 +74,10 @@ def test_payload_nulls_for_missing_fields():
     assert p["Specifications__c"] is None
 
 
-def test_title_truncated_to_100():
-    long_title = "A" * 150
+def test_title_truncated_to_200():
+    long_title = "A" * 250
     p = _build_payload(Product(source="flipkart", rank=1, title=long_title, product_url="https://flipkart.com/p/x"))
-    assert p["Title__c"] == "A" * 100
+    assert p["Title__c"] == "A" * 200
 
 
 def test_clean_url_strips_query_and_fragment():
@@ -110,18 +112,20 @@ async def test_get_token(sf_client):
 async def test_push_product(sf_settings, sf_client, product):
     token = await sf_client._get_token()
     payload = _build_payload(product)
+    title = payload.pop("Title__c")  # external ID goes in URL
+    upsert_url = f"{sf_settings.sf_api_endpoint.rstrip('/')}/Title__c/{quote(title, safe='')}"
 
     async with httpx.AsyncClient(timeout=20) as client:
-        resp = await client.post(
-            sf_settings.sf_api_endpoint,
+        resp = await client.patch(
+            upsert_url,
             json=payload,
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         )
 
-    assert resp.is_success, f"HTTP {resp.status_code} — {resp.text}"
-    record_id = resp.json().get("id")
-    assert record_id, "No record id in response"
-    print(f"\n[OK] Product__c created: {record_id}")
+    assert resp.status_code in (200, 201, 204), f"HTTP {resp.status_code} — {resp.text}"
+    action = "created" if resp.status_code == 201 else "updated"
+    record_id = resp.json().get("id") if resp.status_code == 201 else "(existing record updated)"
+    print(f"\n[OK] Product__c {action}: {record_id}")
 
 
 @pytest.mark.asyncio

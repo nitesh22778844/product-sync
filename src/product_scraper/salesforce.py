@@ -5,7 +5,7 @@ import logging
 import re
 import time
 from typing import Any, Optional
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import quote, urlparse, urlunparse
 
 import httpx
 
@@ -33,7 +33,7 @@ def _parse_discount_pct(discount: Optional[str]) -> Optional[float]:
 
 def _build_payload(product: Product) -> dict[str, Any]:
     return {
-        "Title__c": product.title[:100],  # SF Text(100) field
+        "Title__c": product.title[:200],  # trimmed to 200 before upsert key comparison
         "Source__c": product.source,
         "Rank__c": product.rank,
         "Product_URL__c": _clean_url(product.product_url),
@@ -97,14 +97,30 @@ class SalesforceClient:
             "Content-Type": "application/json",
         }
 
+        # Base URL for upsert-by-external-ID:
+        #   PATCH …/sobjects/Product__c/Title__c/<encoded_title>
+        # Salesforce creates the record if Title__c doesn't exist, updates if it does.
+        base = self._api_endpoint.rstrip("/")
+
         succeeded = 0
         failed = 0
         async with httpx.AsyncClient(timeout=20) as client:
             for product in products:
                 try:
                     body = _build_payload(product)
-                    resp = await client.post(self._api_endpoint, json=body, headers=headers)
-                    if resp.is_success:
+                    title = body.pop("Title__c")  # external ID goes in URL, not body
+                    upsert_url = f"{base}/Title__c/{quote(title, safe='')}"
+                    resp = await client.patch(upsert_url, json=body, headers=headers)
+                    # 201 = created, 200/204 = updated
+                    if resp.status_code in (200, 201, 204):
+                        action = "created" if resp.status_code == 201 else "updated"
+                        logger.debug(
+                            "Salesforce %s product %r (rank=%d source=%s)",
+                            action,
+                            product.title[:60],
+                            product.rank,
+                            product.source,
+                        )
                         succeeded += 1
                     else:
                         failed += 1
