@@ -6,9 +6,9 @@ A Python-based product information aggregator that searches Amazon.in and Flipka
 
 **Primary use case:** Given a query like "HP laptop with 16GB RAM", return 6 rows of comparable product data side-by-side.
 
-## API Status (as of April 2026)
+## API Status (as of May 2026)
 
-- **Amazon PA-API 5.0** — shutting down May 15 2026; no new signups. `fetchers/amazon_api.py` is a stub that raises `APIUnavailableError`.
+- **Amazon PA-API 5.0** — shut down May 15 2026; no new signups. `fetchers/amazon_api.py` is a stub that raises `APIUnavailableError`.
 - **Flipkart Affiliate API** — closed to new signups. No public product search API exists.
 
 Both fetchers use Playwright scraping. The `ProductFetcher` abstract base class keeps the interface extensible if APIs become available later.
@@ -33,6 +33,8 @@ Both fetchers use Playwright scraping. The `ProductFetcher` abstract base class 
 ├── CLAUDE.md
 ├── README.md
 ├── pyproject.toml
+├── requirements.txt               # Flat pin list for Docker — kept in sync with pyproject.toml
+├── Dockerfile                     # python:3.12-slim + Playwright Chromium
 ├── .env.example
 ├── .env                           # Local secrets — never commit
 ├── .gitignore
@@ -43,12 +45,12 @@ Both fetchers use Playwright scraping. The `ProductFetcher` abstract base class 
 │       ├── models.py              # Price, Product, SearchResult
 │       ├── config.py              # Settings (pydantic-settings) incl. Salesforce vars
 │       ├── base.py                # Abstract ProductFetcher
-│       ├── cache.py               # SHA256-keyed JSON file cache
+│       ├── cache.py               # SHA256-keyed JSON file cache (per-request settings aware)
 │       ├── orchestrator.py        # asyncio.gather, shared BrowserContext
 │       ├── exporters.py           # export_json, export_csv, export_jsonl
 │       ├── cli.py                 # typer CLI
 │       ├── api.py                 # FastAPI app — GET /search, GET /health
-│       ├── salesforce.py          # SalesforceClient — OAuth + Product__c sync
+│       ├── salesforce.py          # SalesforceClient — OAuth + Product__c upsert sync
 │       └── fetchers/
 │           ├── __init__.py
 │           ├── amazon_api.py      # Stub — raises APIUnavailableError
@@ -89,12 +91,13 @@ Both fetchers use Playwright scraping. The `ProductFetcher` abstract base class 
 ## Key Implementation Details
 
 ### Stealth Browser Context
-Both fetchers share one `BrowserContext`:
+Both fetchers share one `BrowserContext` created by `Orchestrator`:
 - Realistic Chrome 124 user-agent
 - 1920×1080 viewport, `en-IN` locale, `Asia/Kolkata` timezone
 - `navigator.webdriver` set to `undefined` via init script
 - 2.5s delay between requests; exponential backoff on failures (3 retries max)
 - CAPTCHA detection: if page title contains "Robot Check" or URL contains "captcha", raise `CaptchaError` immediately — never attempt to bypass
+- On Windows, `WindowsProactorEventLoopPolicy` is set at import time in `api.py` so Playwright subprocess works under uvicorn
 
 ### Amazon Selectors (current "puis" layout)
 - Cards: `[data-component-type='s-search-result']`, skip sponsored
@@ -124,7 +127,14 @@ re.sub(r"[₹₹RsINR\s]", "", text).replace(",", "")
 ```
 
 ### Cache
-Key: `sha256(f"{source}:{query}:{date.today()}")[:16]`. Files written to `CACHE_DIR` (default `.cache/`). Invalidates daily.
+- Key: `sha256(f"{source}:{query}:{date.today()}")[:16]` — invalidates daily at midnight
+- Files written to `CACHE_DIR` (default `.cache/`), one JSON file per `(source, query, date)`
+- Both `get_cached` and `set_cache` accept an optional `cache_settings: Settings` parameter
+- Fetchers pass `self.settings` explicitly so per-request overrides (e.g. `no_cache=true`) propagate correctly
+- The module-level `settings` singleton is only used as a fallback when no explicit settings are passed
+
+### no_cache Flag
+When `GET /search?no_cache=true` is received, `api.py` creates a copy of the default settings with `cache_enabled=False` and passes it to `Orchestrator`. This flows through to each fetcher's `get_cached` / `set_cache` calls, ensuring the cache is bypassed for the entire request — both reading and writing.
 
 ## REST API
 
@@ -155,18 +165,28 @@ Leave all four blank to disable sync entirely. The `salesforce_enabled` property
 ### Auth flow
 Client credentials grant (`grant_type=client_credentials`). Token is cached in memory and refreshed 60 s before expiry.
 
+### Upsert logic
+Each product is synced using Salesforce's **upsert-by-external-ID** endpoint:
+```
+PATCH …/sobjects/Product__c/Title__c/<url-encoded-title>
+```
+- `Title__c` must be marked **External ID** in the Salesforce org (`Setup → Object Manager → Product__c → Fields & Relationships → Title__c → Edit → check "External ID"`)
+- 201 = record created; 200 or 204 = record updated (no duplicate created)
+- Title is trimmed to 200 chars before being used as the external ID key
+- `Title__c` is placed in the URL (not the request body); the body contains all other fields
+
 ### Field mapping — `Product__c`
 | Product field | Salesforce field | Notes |
 |---|---|---|
-| `title` | `Name` | Standard required field |
+| `title[:200]` | `Title__c` | External ID — used in upsert URL; trimmed to 200 chars |
 | `source` | `Source__c` | `"amazon"` or `"flipkart"` |
 | `rank` | `Rank__c` | 1–3 |
-| `product_url` | `Product_URL__c` | |
+| `product_url` | `Product_URL__c` | Query string stripped to fit 255-char Text field |
 | `brand` | `Brand__c` | |
 | `model` | `Model__c` | |
 | `current_price.amount` | `Current_Price__c` | Numeric INR amount |
 | `original_price.amount` | `Original_Price__c` | |
-| `discount` | `Discount__c` | e.g. `"21% off"` |
+| `discount` | `Discount__c` | Numeric % extracted from `"21% off"` → `21.0` |
 | `rating` | `Rating__c` | |
 | `review_count` | `Review_Count__c` | |
 | `specifications` | `Specifications__c` | JSON-serialised dict |
