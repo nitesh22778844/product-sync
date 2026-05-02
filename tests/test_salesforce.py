@@ -8,7 +8,7 @@ import pytest
 
 from product_scraper.config import Settings
 from product_scraper.models import Price, Product
-from product_scraper.salesforce import SalesforceClient, _build_payload
+from product_scraper.salesforce import SalesforceClient, _build_payload, _clean_url, _parse_discount_pct
 
 
 @pytest.fixture(scope="module")
@@ -55,11 +55,12 @@ def test_payload_maps_all_fields(product):
     assert p["Rank__c"] == 1
     assert p["Current_Price__c"] == 1499.0
     assert p["Original_Price__c"] == 1999.0
-    assert p["Discount__c"] == "25% off"
+    assert p["Discount__c"] == 25.0
     assert p["Rating__c"] == 4.3
     assert p["Review_Count__c"] == 320
     assert '"Color"' in p["Specifications__c"]
     assert p["Availability__c"] == "In Stock"
+    assert "?" not in p["Product_URL__c"]
 
 
 def test_payload_nulls_for_missing_fields():
@@ -68,6 +69,19 @@ def test_payload_nulls_for_missing_fields():
     assert p["Original_Price__c"] is None
     assert p["Discount__c"] is None
     assert p["Specifications__c"] is None
+
+
+def test_clean_url_strips_query_and_fragment():
+    long_url = "https://www.amazon.in/dp/B0DZDX3JF4/ref=sr_1_3?dib=abc123&tag=foo#section"
+    assert _clean_url(long_url) == "https://www.amazon.in/dp/B0DZDX3JF4/ref=sr_1_3"
+    assert len(_clean_url(long_url)) < 255
+
+
+def test_parse_discount_pct():
+    assert _parse_discount_pct("21% off") == 21.0
+    assert _parse_discount_pct("4% off") == 4.0
+    assert _parse_discount_pct(None) is None
+    assert _parse_discount_pct("no discount") is None
 
 
 # ---------------------------------------------------------------------------

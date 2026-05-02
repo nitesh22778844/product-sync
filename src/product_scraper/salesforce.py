@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from typing import Any, Optional
+from urllib.parse import urlparse, urlunparse
 
 import httpx
 
@@ -15,18 +17,31 @@ logger = logging.getLogger(__name__)
 _TOKEN_EXPIRY_BUFFER = 60  # refresh token this many seconds before it expires
 
 
+def _clean_url(url: str) -> str:
+    """Strip query string and fragment so the URL fits in a 255-char SF Text field."""
+    parsed = urlparse(url)
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+
+
+def _parse_discount_pct(discount: Optional[str]) -> Optional[float]:
+    """Extract numeric percentage from strings like '21% off' for SF Percent fields."""
+    if not discount:
+        return None
+    m = re.search(r"(\d+(?:\.\d+)?)\s*%", discount)
+    return float(m.group(1)) if m else None
+
 
 def _build_payload(product: Product) -> dict[str, Any]:
     return {
         "Name": product.title,
         "Source__c": product.source,
         "Rank__c": product.rank,
-        "Product_URL__c": product.product_url,
+        "Product_URL__c": _clean_url(product.product_url),
         "Brand__c": product.brand,
         "Model__c": product.model,
         "Current_Price__c": product.current_price.amount if product.current_price else None,
         "Original_Price__c": product.original_price.amount if product.original_price else None,
-        "Discount__c": product.discount,
+        "Discount__c": _parse_discount_pct(product.discount),
         "Rating__c": product.rating,
         "Review_Count__c": product.review_count,
         "Specifications__c": json.dumps(product.specifications) if product.specifications else None,
