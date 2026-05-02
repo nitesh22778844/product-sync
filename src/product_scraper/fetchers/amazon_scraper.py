@@ -45,14 +45,19 @@ class AmazonScraperFetcher(ProductFetcher):
     async def search(self, query: str, limit: int = 3) -> list[Product]:
         cached = get_cached(self.source, query)
         if cached is not None:
+            logger.info("[amazon] cache hit for %r — returning %d cached products", query, len(cached))
             return [Product(**d) for d in cached]
 
+        logger.info("[amazon] cache miss for %r — fetching live", query)
         url = f"{BASE_URL}/s?k={quote_plus(query)}"
+        logger.info("[amazon] fetching search page: %s", url)
         html = await self._fetch(url, wait_selector="[data-component-type='s-search-result']")
         raw_cards = self._parse_search_page(html, limit)
+        logger.info("[amazon] parsed %d search cards", len(raw_cards))
 
         products: list[Product] = []
         for rank, card in enumerate(raw_cards, start=1):
+            logger.info("[amazon] fetching product detail page %d/%d: %s", rank, len(raw_cards), card["product_url"])
             product_html = await self._fetch(card["product_url"])
             specs = self._parse_product_page(product_html)
             card.update(specs)
@@ -63,6 +68,7 @@ class AmazonScraperFetcher(ProductFetcher):
             except Exception as exc:
                 logger.warning("Failed to build Product from card %d: %s", rank, exc)
 
+        logger.info("[amazon] completed: %d products built for %r", len(products), query)
         set_cache(self.source, query, [p.model_dump(mode="json") for p in products])
         return products
 

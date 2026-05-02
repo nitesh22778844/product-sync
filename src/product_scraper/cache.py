@@ -31,7 +31,7 @@ def get_cached(source: str, query: str) -> Optional[list[dict]]:
         entry = json.loads(path.read_text(encoding="utf-8"))
         if entry.get("cached_at") != date.today().isoformat():
             return None
-        logger.debug("Cache hit: %s / %s", source, query)
+        logger.info("Cache hit: %s / %s", source, query)
         return entry["data"]
     except Exception:
         return None

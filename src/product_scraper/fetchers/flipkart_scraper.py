@@ -43,9 +43,12 @@ class FlipkartScraperFetcher(ProductFetcher):
     async def search(self, query: str, limit: int = 3) -> list[Product]:
         cached = get_cached(self.source, query)
         if cached is not None:
+            logger.info("[flipkart] cache hit for %r — returning %d cached products", query, len(cached))
             return [Product(**d) for d in cached]
 
+        logger.info("[flipkart] cache miss for %r — fetching live", query)
         url = f"{BASE_URL}/search?q={quote_plus(query)}"
+        logger.info("[flipkart] fetching search page: %s", url)
         page = await self.context.new_page()
         try:
             html = await self._load_search_page(page, url)
@@ -53,10 +56,12 @@ class FlipkartScraperFetcher(ProductFetcher):
             await page.close()
 
         raw_cards = self._parse_search_page(html, limit)
+        logger.info("[flipkart] parsed %d search cards", len(raw_cards))
 
         products: list[Product] = []
         for rank, card in enumerate(raw_cards, start=1):
             try:
+                logger.info("[flipkart] fetching product detail page %d/%d: %s", rank, len(raw_cards), card["product_url"])
                 detail_html = await self._fetch(card["product_url"])
                 specs = self._parse_product_page(detail_html)
                 card.update(specs)
@@ -66,6 +71,7 @@ class FlipkartScraperFetcher(ProductFetcher):
             except Exception as exc:
                 logger.warning("Failed to build Flipkart product %d: %s", rank, exc)
 
+        logger.info("[flipkart] completed: %d products built for %r", len(products), query)
         set_cache(self.source, query, [p.model_dump(mode="json") for p in products])
         return products
 
@@ -100,7 +106,7 @@ class FlipkartScraperFetcher(ProductFetcher):
             try:
                 await page.wait_for_selector(sel, timeout=3_000)
                 await page.click(sel)
-                logger.debug("Dismissed Flipkart modal with selector: %s", sel)
+                logger.info("[flipkart] dismissed login modal with selector: %s", sel)
                 return
             except PlaywrightTimeoutError:
                 continue
@@ -112,6 +118,7 @@ class FlipkartScraperFetcher(ProductFetcher):
                 timeout=2_000,
             )
             if pin_input:
+                logger.info("[flipkart] filling pincode: %s", DELIVERY_PINCODE)
                 await pin_input.fill(DELIVERY_PINCODE)
                 await page.keyboard.press("Enter")
                 await asyncio.sleep(1.5)

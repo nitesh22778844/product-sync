@@ -24,11 +24,15 @@ class Orchestrator:
         self.settings = settings
 
     async def run(self, query: str) -> SearchResult:
+        import time
+        t0 = time.perf_counter()
+        logger.info("[%s] starting scrape", query)
         async with async_playwright() as pw:
             launch_kwargs: dict = {"headless": self.settings.headless}
             if self.settings.http_proxy:
                 launch_kwargs["proxy"] = {"server": self.settings.http_proxy}
 
+            logger.info("[%s] launching browser (headless=%s)", query, self.settings.headless)
             browser = await pw.chromium.launch(**launch_kwargs)
             try:
                 context = await browser.new_context(
@@ -46,19 +50,28 @@ class Orchestrator:
                     AmazonScraperFetcher(self.settings, context),
                     FlipkartScraperFetcher(self.settings, context),
                 ]
+                logger.info("[%s] dispatching amazon + flipkart fetchers", query)
                 try:
                     tasks = [f.search(query) for f in fetchers]
                     outcomes = await asyncio.gather(*tasks, return_exceptions=True)
 
                     products = []
                     errors: dict[str, str] = {}
+                    counts: dict[str, int] = {}
                     for fetcher, result in zip(fetchers, outcomes):
                         if isinstance(result, Exception):
                             errors[fetcher.source] = str(result)
-                            logger.warning("%s fetcher failed: %s", fetcher.source, result)
+                            logger.warning("[%s] %s fetcher failed: %s", query, fetcher.source, result)
+                            counts[fetcher.source] = 0
                         else:
                             products.extend(result)
+                            counts[fetcher.source] = len(result)
 
+                    elapsed = time.perf_counter() - t0
+                    logger.info(
+                        "[%s] done in %.1fs — amazon: %d, flipkart: %d, total: %d",
+                        query, elapsed, counts.get("amazon", 0), counts.get("flipkart", 0), len(products),
+                    )
                     return SearchResult(query=query, results=products, errors=errors)
                 finally:
                     for f in fetchers:
