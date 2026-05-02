@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import Optional
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request, Response
 
 from product_scraper.config import Settings, settings as _default_settings
 from product_scraper.models import SearchResult
 from product_scraper.orchestrator import Orchestrator
+from product_scraper.salesforce import SalesforceClient
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,6 +25,14 @@ app = FastAPI(
     version="0.1.0",
     description="Search Amazon.in and Flipkart.com — returns top 3 results from each site.",
 )
+
+_sf_client: Optional[SalesforceClient] = (
+    SalesforceClient(_default_settings) if _default_settings.salesforce_enabled else None
+)
+if _sf_client:
+    logger.info("Salesforce sync enabled (endpoint=%s)", _default_settings.sf_api_endpoint)
+else:
+    logger.info("Salesforce sync disabled — set SF_TOKEN_URL, SF_CLIENT_ID, SF_CLIENT_SECRET, SF_API_ENDPOINT to enable")
 
 
 @app.middleware("http")
@@ -48,6 +58,7 @@ async def health() -> dict:
     response_description="Top 3 results from Amazon.in and Flipkart.com",
 )
 async def search(
+    background_tasks: BackgroundTasks,
     q: str = Query(..., min_length=1, description="Product search query"),
     no_cache: bool = Query(False, description="Bypass cache for this request"),
 ) -> SearchResult:
@@ -61,6 +72,9 @@ async def search(
     try:
         result = await orchestrator.run(q)
         logger.info("Search complete: q=%r  results=%d  errors=%s", q, len(result.results), list(result.errors.keys()) or "none")
+        if _sf_client and result.results:
+            background_tasks.add_task(_sf_client.sync_products, result.results)
+            logger.info("Salesforce sync queued for %d products (q=%r)", len(result.results), q)
         return result
     except Exception as exc:
         logger.exception("Orchestrator failed for query %r", q)

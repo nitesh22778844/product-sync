@@ -23,6 +23,8 @@ Both fetchers use Playwright scraping. The `ProductFetcher` abstract base class 
 - **pandas** — CSV export
 - **typer** — CLI
 - **python-dotenv** — `.env` loading
+- **FastAPI + uvicorn** — REST API server
+- **httpx** — async HTTP client (Salesforce REST calls)
 
 ## Project Structure
 
@@ -32,18 +34,21 @@ Both fetchers use Playwright scraping. The `ProductFetcher` abstract base class 
 ├── README.md
 ├── pyproject.toml
 ├── .env.example
+├── .env                           # Local secrets — never commit
 ├── .gitignore
 ├── src/
 │   └── product_scraper/
 │       ├── __init__.py
 │       ├── __main__.py            # python -m product_scraper entry point
 │       ├── models.py              # Price, Product, SearchResult
-│       ├── config.py              # Settings (pydantic-settings)
+│       ├── config.py              # Settings (pydantic-settings) incl. Salesforce vars
 │       ├── base.py                # Abstract ProductFetcher
 │       ├── cache.py               # SHA256-keyed JSON file cache
 │       ├── orchestrator.py        # asyncio.gather, shared BrowserContext
 │       ├── exporters.py           # export_json, export_csv, export_jsonl
 │       ├── cli.py                 # typer CLI
+│       ├── api.py                 # FastAPI app — GET /search, GET /health
+│       ├── salesforce.py          # SalesforceClient — OAuth + Product__c sync
 │       └── fetchers/
 │           ├── __init__.py
 │           ├── amazon_api.py      # Stub — raises APIUnavailableError
@@ -54,7 +59,11 @@ Both fetchers use Playwright scraping. The `ProductFetcher` abstract base class 
     ├── fixtures/                  # Saved HTML pages for offline tests
     ├── test_models.py
     ├── test_amazon_scraper.py
-    └── test_flipkart_scraper.py
+    ├── test_flipkart_scraper.py
+    ├── test_api.py
+    ├── test_cache.py
+    ├── test_exporters.py
+    └── test_orchestrator.py
 ```
 
 ## Output Schema
@@ -116,6 +125,56 @@ re.sub(r"[₹₹RsINR\s]", "", text).replace(",", "")
 
 ### Cache
 Key: `sha256(f"{source}:{query}:{date.today()}")[:16]`. Files written to `CACHE_DIR` (default `.cache/`). Invalidates daily.
+
+## REST API
+
+Start the server:
+```bash
+python -m uvicorn product_scraper.api:app --host 0.0.0.0 --port 8080
+```
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/health` | GET | Health check — returns `{"status": "ok"}` |
+| `/search?q=<query>` | GET | Search products; optional `&no_cache=true` |
+| `/docs` | GET | Swagger UI |
+
+On each `/search` response the API also fires a **background task** that pushes all returned products to the Salesforce `Product__c` object. The HTTP response is returned immediately — Salesforce sync runs independently and never delays or fails the response.
+
+## Salesforce Integration
+
+### Configuration (`.env`)
+```
+SF_TOKEN_URL=https://<instance>.my.salesforce.com/services/oauth2/token
+SF_CLIENT_ID=<connected-app-client-id>
+SF_CLIENT_SECRET=<connected-app-client-secret>
+SF_API_ENDPOINT=https://<instance>.my.salesforce.com/services/data/v57.0/sobjects/Product__c/
+```
+Leave all four blank to disable sync entirely. The `salesforce_enabled` property on `Settings` controls whether `SalesforceClient` is instantiated at startup.
+
+### Auth flow
+Client credentials grant (`grant_type=client_credentials`). Token is cached in memory and refreshed 60 s before expiry.
+
+### Field mapping — `Product__c`
+| Product field | Salesforce field | Notes |
+|---|---|---|
+| `title` | `Name` | Standard required field |
+| `source` | `Source__c` | `"amazon"` or `"flipkart"` |
+| `rank` | `Rank__c` | 1–3 |
+| `product_url` | `Product_URL__c` | |
+| `brand` | `Brand__c` | |
+| `model` | `Model__c` | |
+| `current_price.amount` | `Current_Price__c` | Numeric INR amount |
+| `original_price.amount` | `Original_Price__c` | |
+| `discount` | `Discount__c` | e.g. `"21% off"` |
+| `rating` | `Rating__c` | |
+| `review_count` | `Review_Count__c` | |
+| `specifications` | `Specifications__c` | JSON-serialised dict |
+| `image_url` | `Image_URL__c` | |
+| `availability` | `Availability__c` | |
+| `scraped_at` | `Scraped_At__c` | ISO 8601 datetime string |
+
+All custom fields must exist on `Product__c` before triggering a search, or Salesforce will reject the record. Per-product errors are logged as warnings and never surface to the API caller.
 
 ## CLI Usage
 

@@ -19,6 +19,7 @@ dependencies = [
     "asyncio-throttle>=1.0",
     "fastapi>=0.111",
     "uvicorn[standard]>=0.29",
+    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
@@ -28,7 +29,6 @@ dev = [
     "pytest-mock>=3.14",
     "ruff>=0.4",
     "watchdog>=4.0",
-    "httpx>=0.27",
 ]
 
 [project.scripts]
