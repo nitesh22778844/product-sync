@@ -102,7 +102,11 @@ Both fetchers share one `BrowserContext` created by `Orchestrator`:
 ### Amazon Selectors (current "puis" layout)
 - Cards: `[data-component-type='s-search-result']`, skip sponsored
 - Title + URL: `[data-cy='title-recipe'] a[href]`
-- Price: `.a-price .a-offscreen` (first = current, `.a-text-price .a-offscreen` = original)
+- Price (tried in order):
+  1. `.a-price .a-offscreen` — standard layout
+  2. `[data-a-color='price'] .a-offscreen` — nowstore/Fresh colored price variant
+  3. `.a-price-whole` + `.a-price-fraction` — decomposed parts used on some grocery cards
+- Original price: `.a-price.a-text-price .a-offscreen`, fallback `[data-a-color='secondary'] .a-offscreen`
 - Rating: `i[data-cy='reviews-ratings-slot']`
 - Review count: `[data-cy='reviews-block'] a` (handles `2.7L` → 270000, `45K` → 45000)
 - Spec table (product page): tries `#productDetails_techSpec_section_1 tr`, `#tech-specs-section tr`, `#technicalSpecifications_section_1 tr`, `table.a-normal.a-spacing-micro tr`
@@ -110,15 +114,25 @@ Both fetchers share one `BrowserContext` created by `Orchestrator`:
 - Brand: `#bylineInfo` (strips "Visit the … Store" and "Brand: " prefix)
 
 ### Flipkart Selectors
+
+**Regular marketplace (default)**
 - Cards: `div[data-id]` (stable attribute, works for both grid and list layouts)
 - Title: `a[title]` attribute (DOM text is CSS-truncated; `title` attr has full name)
 - Product URL: `a[href*='/p/']`
 - Image: `link_tag.select_one("img")["src"]` — skips base64 SVG placeholders
-- Price: first text node matching `₹[\d,]+`
+- Price: first text node matching `₹[\d,]+`; second distinct ₹ price (if greater than current) is treated as MRP
 - Rating: text node matching `\d\.\d`
 - Spec table (product page): `div._3k-BhJ table tr`, `table._14cfVK tr`, `._2TIQom table tr`
 - Login modal: dismissed once per fetcher instance using multiple selector fallbacks
 - Pin code: fills `560094` if `input[placeholder*='Pincode']` appears
+
+**Flipkart Minutes (`grocery_mode=True`)** — see *Grocery Mode* below for full details
+- Card selector: `a[href*='/p/']` (the link IS the card; no wrapper div)
+- Title: first non-trivial text node inside the link, skipping `N mins` delivery time
+- Image: `link.find('img')`
+- Prices: extracted from the link's **parent** `<div>` text nodes; first ₹ value = MRP, second ₹ = current price (reverse of regular Flipkart)
+- Discount: `<n>%` + `Off` adjacent text nodes → `"<n>% off"`
+- Location gate: `_click_use_current_location` clicks the "Use my current location" CTA found by exact-text DOM match
 
 ### Price Parsing
 Strip `₹`, `Rs`, `INR`, whitespace; replace `,` (thousands separator); **keep `.`** (decimal point):
@@ -136,17 +150,54 @@ re.sub(r"[₹₹RsINR\s]", "", text).replace(",", "")
 ### no_cache Flag
 When `GET /search?no_cache=true` is received, `api.py` creates a copy of the default settings with `cache_enabled=False` and passes it to `Orchestrator`. This flows through to each fetcher's `get_cached` / `set_cache` calls, ensuring the cache is bypassed for the entire request — both reading and writing.
 
+### Grocery Mode
+When `GET /search?grocery=true` is received, `api.py` sets `grocery_mode=True` on the request-scoped settings copy. Both fetchers switch to grocery-specific behaviour.
+
+**Amazon** appends `&i=nowstore` → routes to Amazon Fresh / Quick Commerce:
+```
+https://www.amazon.in/s?k=<query>&i=nowstore
+```
+Card structure is the same as regular Amazon, but the existing `.a-price .a-offscreen` price selector handles the grocery card layout (with the fallbacks documented under *Amazon Selectors*).
+
+**Flipkart** routes to **Flipkart Minutes** — Flipkart's HYPERLOCAL quick-commerce app. This is fundamentally different from the regular Flipkart marketplace and requires several extra steps:
+
+1. **Search URL** — full param set is constructed (a `requestId` UUID is generated per request):
+   ```
+   https://www.flipkart.com/search?q=<q>&as=on&as-show=on&marketplace=HYPERLOCAL
+     &otracker=AS_Query_OrganicAutoSuggest_1_11_na_na_na
+     &otracker1=AS_Query_OrganicAutoSuggest_1_11_na_na_na
+     &as-pos=1&as-type=RECENT
+     &suggestionId=<q>&requestId=<uuid>&as-searchtext=<q>
+   ```
+
+2. **Geolocation** — when `grocery_mode` is on, `Orchestrator` grants geolocation permission and sets coordinates to Bangalore (`13.0358, 77.5970`) on the `BrowserContext`. Without this the next step has no effect.
+
+3. **Location-gate click** — Flipkart Minutes shows a "Use my current location" CTA before any products render. The element is a plain `<div>` with CSS-in-JS classes (no stable selector), so `_click_use_current_location` finds it by exact text match in the DOM and clicks the nearest clickable ancestor. Done on every page load (search and product detail).
+
+4. **Search-card parsing** — Minutes does NOT use the `div[data-id]` wrapper found on regular Flipkart pages. Each product is rendered as a bare `<a href*='/p/'>` with no wrapping card div. The dedicated `_parse_minutes_search_page` / `_parse_minutes_card` methods handle this:
+   - Card selector: `a[href*='/p/']`
+   - Title: first non-trivial text node inside the link (skipping "N mins" delivery time)
+   - Image: `<img>` inside the link
+   - Prices/discount/quantity: text nodes in the link's **parent** `<div>`. DOM order is `[discount%][Off][quantity][title][N mins][MRP ₹][current ₹][Add]`, so MRP is the **first** ₹ value and current price is the **second** — opposite of regular Flipkart cards.
+   - Discount format: combines `42%` + `Off` text nodes into `"42% off"`
+
+5. **Product URL safety net** — after parsing, if any extracted URL doesn't already carry `marketplace=HYPERLOCAL`, it's appended before the detail page is fetched (ensures the Minutes page is loaded, not the regular marketplace).
+
+`grocery_mode` can also be set permanently via the `GROCERY_MODE=true` environment variable.
+
+Grocery product pages have no spec tables — `specifications` will be `null` for most grocery items.
+
 ## REST API
 
 Start the server:
 ```bash
-python -m uvicorn product_scraper.api:app --host 0.0.0.0 --port 8080
+python -m uvicorn product_scraper.api:app --host 0.0.0.0 --port 8000
 ```
 
 | Endpoint | Method | Description |
 |---|---|---|
 | `/health` | GET | Health check — returns `{"status": "ok"}` |
-| `/search?q=<query>` | GET | Search products; optional `&no_cache=true` |
+| `/search?q=<query>` | GET | Search products; optional `&no_cache=true`, `&grocery=true` |
 | `/docs` | GET | Swagger UI |
 
 On each `/search` response the API also fires a **background task** that pushes all returned products to the Salesforce `Product__c` object. The HTTP response is returned immediately — Salesforce sync runs independently and never delays or fails the response.

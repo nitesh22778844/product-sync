@@ -35,13 +35,19 @@ class Orchestrator:
             logger.info("[%s] launching browser (headless=%s)", query, self.settings.headless)
             browser = await pw.chromium.launch(**launch_kwargs)
             try:
-                context = await browser.new_context(
+                context_kwargs: dict = dict(
                     user_agent=_USER_AGENT,
                     viewport={"width": 1920, "height": 1080},
                     locale="en-IN",
                     timezone_id="Asia/Kolkata",
                     extra_http_headers={"Accept-Language": "en-IN,en;q=0.9"},
                 )
+                # Flipkart Minutes (HYPERLOCAL) gates products behind a "Use my current location"
+                # CTA — granting geolocation up front lets the click resolve immediately.
+                if self.settings.grocery_mode:
+                    context_kwargs["geolocation"] = {"latitude": 13.0358, "longitude": 77.5970}
+                    context_kwargs["permissions"] = ["geolocation"]
+                context = await browser.new_context(**context_kwargs)
                 await context.add_init_script(
                     "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
                 )

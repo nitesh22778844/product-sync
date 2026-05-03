@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     request_delay_seconds: float = 2.5
     max_retries: int = 3
     cache_enabled: bool = True
+    grocery_mode: bool = False
     cache_dir: Path = Path(".cache")
     playwright_browser: str = "chromium"
     http_proxy: Optional[str] = None

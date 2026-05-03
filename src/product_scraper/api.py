@@ -68,13 +68,15 @@ async def search(
     background_tasks: BackgroundTasks,
     q: str = Query(..., min_length=1, description="Product search query"),
     no_cache: bool = Query(False, description="Bypass cache for this request"),
+    grocery: bool = Query(False, description="Search grocery stores (Amazon nowstore + Flipkart HYPERLOCAL)"),
 ) -> SearchResult:
-    logger.info("Search request: q=%r  no_cache=%s", q, no_cache)
-    req_settings: Settings = (
-        _default_settings.model_copy(update={"cache_enabled": False})
-        if no_cache
-        else _default_settings
-    )
+    logger.info("Search request: q=%r  no_cache=%s  grocery=%s", q, no_cache, grocery)
+    overrides: dict = {}
+    if no_cache:
+        overrides["cache_enabled"] = False
+    if grocery:
+        overrides["grocery_mode"] = True
+    req_settings: Settings = _default_settings.model_copy(update=overrides) if overrides else _default_settings
     orchestrator = Orchestrator(req_settings)
     try:
         result = await orchestrator.run(q)

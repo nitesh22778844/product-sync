@@ -49,7 +49,8 @@ class AmazonScraperFetcher(ProductFetcher):
             return [Product(**d) for d in cached]
 
         logger.info("[amazon] cache miss for %r — fetching live", query)
-        url = f"{BASE_URL}/s?k={quote_plus(query)}"
+        store = "nowstore" if self.settings.grocery_mode else None
+        url = f"{BASE_URL}/s?k={quote_plus(query)}" + (f"&i={store}" if store else "")
         logger.info("[amazon] fetching search page: %s", url)
         html = await self._fetch(url, wait_selector="[data-component-type='s-search-result']")
         raw_cards = self._parse_search_page(html, limit)
@@ -115,11 +116,24 @@ class AmazonScraperFetcher(ProductFetcher):
         href = link_tag["href"]
         product_url = href if href.startswith("http") else BASE_URL + href
 
-        # Prices — first .a-offscreen is current; .a-text-price .a-offscreen is strike-through MRP
+        # Prices — try selectors in order: standard layout, then nowstore/Fresh variants
         price_tags = card.select(".a-price .a-offscreen")
-        current_price = self._extract_price(price_tags[0].get_text() if price_tags else None)
+        if not price_tags:
+            price_tags = card.select("[data-a-color='price'] .a-offscreen")
+        current_price: Optional[dict] = None
+        if price_tags:
+            current_price = self._extract_price(price_tags[0].get_text())
+        else:
+            # Decomposed whole + fraction (e.g. nowstore grocery cards)
+            whole = card.select_one(".a-price-whole")
+            if whole:
+                frac = card.select_one(".a-price-fraction")
+                raw = whole.get_text(strip=True).rstrip(".") + ("." + frac.get_text(strip=True) if frac else "")
+                current_price = self._extract_price(raw)
 
         original_tag = card.select_one(".a-price.a-text-price .a-offscreen")
+        if not original_tag:
+            original_tag = card.select_one("[data-a-color='secondary'] .a-offscreen")
         original_price = self._extract_price(original_tag.get_text() if original_tag else None)
         # Only keep original price if it's actually higher than current (avoids per-unit prices)
         if original_price and current_price and original_price["amount"] <= current_price["amount"]:

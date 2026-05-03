@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import uuid
 from typing import Optional
 from urllib.parse import quote_plus
 
@@ -47,7 +48,19 @@ class FlipkartScraperFetcher(ProductFetcher):
             return [Product(**d) for d in cached]
 
         logger.info("[flipkart] cache miss for %r — fetching live", query)
-        url = f"{BASE_URL}/search?q={quote_plus(query)}"
+        if self.settings.grocery_mode:
+            q = quote_plus(query)
+            request_id = str(uuid.uuid4())
+            url = (
+                f"{BASE_URL}/search?q={q}"
+                f"&as=on&as-show=on&marketplace=HYPERLOCAL"
+                f"&otracker=AS_Query_OrganicAutoSuggest_1_11_na_na_na"
+                f"&otracker1=AS_Query_OrganicAutoSuggest_1_11_na_na_na"
+                f"&as-pos=1&as-type=RECENT"
+                f"&suggestionId={q}&requestId={request_id}&as-searchtext={q}"
+            )
+        else:
+            url = f"{BASE_URL}/search?q={quote_plus(query)}"
         logger.info("[flipkart] fetching search page: %s", url)
         page = await self.context.new_page()
         try:
@@ -57,6 +70,13 @@ class FlipkartScraperFetcher(ProductFetcher):
 
         raw_cards = self._parse_search_page(html, limit)
         logger.info("[flipkart] parsed %d search cards", len(raw_cards))
+
+        if self.settings.grocery_mode:
+            for card in raw_cards:
+                purl = card.get("product_url", "")
+                if purl and "marketplace=HYPERLOCAL" not in purl:
+                    sep = "&" if "?" in purl else "?"
+                    card["product_url"] = purl + sep + "marketplace=HYPERLOCAL"
 
         products: list[Product] = []
         for rank, card in enumerate(raw_cards, start=1):
@@ -81,17 +101,22 @@ class FlipkartScraperFetcher(ProductFetcher):
 
     async def _load_search_page(self, page: Page, url: str) -> str:
         await asyncio.sleep(self.settings.request_delay_seconds)
-        await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+        wait_strategy = "networkidle" if self.settings.grocery_mode else "domcontentloaded"
+        await page.goto(url, wait_until=wait_strategy, timeout=45_000)
 
-        if not self._modal_dismissed:
-            await self._dismiss_modal(page)
-            self._modal_dismissed = True
-
-        await self._fill_pincode_if_needed(page)
+        if self.settings.grocery_mode:
+            # Flipkart Minutes is gated by a "Use my current location" CTA. Geolocation
+            # was granted at the BrowserContext level, so clicking resolves immediately.
+            await self._click_use_current_location(page)
+        else:
+            if not self._modal_dismissed:
+                await self._dismiss_modal(page)
+                self._modal_dismissed = True
+            await self._fill_pincode_if_needed(page)
 
         # Wait for product cards to appear
         try:
-            await page.wait_for_selector("a[href*='/p/']", timeout=10_000)
+            await page.wait_for_selector("a[href*='/p/']", timeout=15_000)
         except PlaywrightTimeoutError:
             logger.debug("No /p/ links found on Flipkart search page")
 
@@ -100,6 +125,39 @@ class FlipkartScraperFetcher(ProductFetcher):
         await asyncio.sleep(1.5)
 
         return await page.content()
+
+    async def _click_use_current_location(self, page: Page) -> None:
+        """Flipkart Minutes (HYPERLOCAL) shows a 'Use my current location' CTA before
+        any products render. The element is a div in a CSS-in-JS tree (no stable
+        selector), so we find it by exact text match in the DOM."""
+        try:
+            clicked = await page.evaluate(
+                """() => {
+                    const all = document.querySelectorAll('div, button, span, a');
+                    for (const el of all) {
+                        if (el.children.length === 0 &&
+                            el.textContent.trim() === 'Use my current location') {
+                            let target = el;
+                            for (let i = 0; i < 5 && target; i++) {
+                                if (target.tagName === 'BUTTON' ||
+                                    target.onclick ||
+                                    target.getAttribute('role') === 'button') break;
+                                target = target.parentElement;
+                            }
+                            (target || el).click();
+                            return true;
+                        }
+                    }
+                    return false;
+                }"""
+            )
+            if clicked:
+                logger.info("[flipkart] clicked 'Use my current location' (Minutes gate)")
+                await asyncio.sleep(4)
+            else:
+                logger.debug("[flipkart] no 'Use my current location' CTA found")
+        except Exception as exc:
+            logger.warning("[flipkart] failed to click location CTA: %s", exc)
 
     async def _dismiss_modal(self, page: Page) -> None:
         for sel in _MODAL_CLOSE_SELECTORS:
@@ -127,6 +185,9 @@ class FlipkartScraperFetcher(ProductFetcher):
 
     def _parse_search_page(self, html: str, limit: int) -> list[dict]:
         soup = BeautifulSoup(html, "lxml")
+        if self.settings.grocery_mode:
+            return self._parse_minutes_search_page(soup, limit)
+
         # Each product card is a div[data-id] — stable Flipkart attribute
         cards = soup.select("div[data-id]")
         seen_urls: set[str] = set()
@@ -144,6 +205,88 @@ class FlipkartScraperFetcher(ProductFetcher):
                 results.append(parsed)
 
         return results
+
+    def _parse_minutes_search_page(self, soup: BeautifulSoup, limit: int) -> list[dict]:
+        """Flipkart Minutes (HYPERLOCAL) renders each product as an `<a href*='/p/'>`
+        with no wrapping data-id. Title/image are inside the link; price/discount
+        are sibling text nodes in the parent <div>.
+        """
+        results: list[dict] = []
+        seen_urls: set[str] = set()
+
+        for link_tag in soup.select("a[href*='/p/']"):
+            if len(results) >= limit:
+                break
+            parsed = self._parse_minutes_card(link_tag)
+            if not parsed or not parsed.get("title") or not parsed.get("product_url"):
+                continue
+            url = parsed["product_url"]
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+            results.append(parsed)
+
+        return results
+
+    def _parse_minutes_card(self, link_tag: Tag) -> dict:
+        href = link_tag.get("href", "")
+        product_url = href if href.startswith("http") else BASE_URL + href
+
+        # Image: <img> inside the link
+        image_url: Optional[str] = None
+        img_tag = link_tag.find("img")
+        if img_tag:
+            src = img_tag.get("src", "")
+            image_url = src if src and not src.startswith("data:") else None
+
+        # Title: first non-trivial text node in the link (NOT "9 mins" delivery time)
+        title: Optional[str] = None
+        for t in link_tag.find_all(string=True):
+            txt = t.strip()
+            if txt and not re.fullmatch(r"\d+\s*mins?", txt, re.I) and len(txt) > 2:
+                title = txt
+                break
+
+        # Prices/discount/quantity: in the parent container's text nodes (in DOM order:
+        # discount %, "Off", quantity, title, "N mins", MRP ₹, current ₹, "Add")
+        parent = link_tag.parent
+        current_price: Optional[dict] = None
+        original_price: Optional[dict] = None
+        discount: Optional[str] = None
+        if parent:
+            text_nodes = [t.strip() for t in parent.find_all(string=True) if t.strip()]
+            prices = [
+                float(m.group(1).replace(",", ""))
+                for t in text_nodes
+                for m in [re.search(r"₹\s*([\d,]+(?:\.\d+)?)", t)]
+                if m
+            ]
+            # In Minutes layout: MRP appears before discounted price in DOM order
+            if len(prices) >= 2:
+                original_price = {"amount": prices[0], "currency": "INR"}
+                current_price = {"amount": prices[1], "currency": "INR"}
+            elif prices:
+                current_price = {"amount": prices[0], "currency": "INR"}
+
+            # Discount: "42%" + "Off" → "42% off"
+            for i, t in enumerate(text_nodes):
+                pct = re.match(r"(\d+)%$", t)
+                if pct:
+                    next_t = text_nodes[i + 1] if i + 1 < len(text_nodes) else ""
+                    if next_t.lower() == "off":
+                        discount = f"{pct.group(1)}% off"
+                    break
+
+        return {
+            "title": title,
+            "product_url": product_url,
+            "current_price": current_price,
+            "original_price": original_price,
+            "discount": discount,
+            "rating": None,
+            "review_count": None,
+            "image_url": image_url,
+        }
 
     def _parse_card(self, card: Tag) -> dict:
         # Product URL — any /p/ link in the card
@@ -265,16 +408,16 @@ class FlipkartScraperFetcher(ProductFetcher):
             try:
                 await asyncio.sleep(self.settings.request_delay_seconds)
                 page = await self.context.new_page()
+                wait_strategy = "networkidle" if self.settings.grocery_mode else "domcontentloaded"
+                await page.goto(url, wait_until=wait_strategy, timeout=45_000)
 
-                if not self._modal_dismissed:
-                    # First page load may show modal
-                    await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-                    await self._dismiss_modal(page)
-                    self._modal_dismissed = True
+                if self.settings.grocery_mode:
+                    await self._click_use_current_location(page)
                 else:
-                    await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-
-                await self._fill_pincode_if_needed(page)
+                    if not self._modal_dismissed:
+                        await self._dismiss_modal(page)
+                        self._modal_dismissed = True
+                    await self._fill_pincode_if_needed(page)
                 return await page.content()
 
             except PlaywrightTimeoutError:
