@@ -20,6 +20,7 @@ def _make_playwright_mock():
     """Return a mock that satisfies: async with async_playwright() as pw: ..."""
     mock_context = MagicMock()
     mock_context.add_init_script = AsyncMock()
+    mock_context.route = AsyncMock()
 
     mock_browser = AsyncMock()
     mock_browser.new_context = AsyncMock(return_value=mock_context)

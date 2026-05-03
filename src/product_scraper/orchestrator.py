@@ -18,6 +18,40 @@ _USER_AGENT = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
+# Chromium flags tuned for low-memory hosts (Render starter ~512MB).
+_CHROMIUM_LOW_MEMORY_ARGS = [
+    "--disable-dev-shm-usage",  # /dev/shm is ~64MB on Render — force disk-backed shared mem
+    "--disable-gpu",
+    "--no-sandbox",
+    "--disable-extensions",
+    "--disable-background-networking",
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+    "--disable-breakpad",
+    "--disable-component-extensions-with-background-pages",
+    "--disable-features=TranslateUI,AcceptCHFrame,MediaRouter,OptimizationHints",
+    "--disable-ipc-flooding-protection",
+    "--mute-audio",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--metrics-recording-only",
+    "--password-store=basic",
+    "--use-mock-keychain",
+]
+
+# Resource types we don't need for HTML parsing — blocking them at the network
+# layer slashes per-page memory and bandwidth. JS/CSS/XHR/fetch stay enabled
+# because both sites SPA-render their product cards.
+_BLOCKED_RESOURCE_TYPES = {"image", "media", "font"}
+
+
+async def _block_heavy_resources(route, request) -> None:
+    if request.resource_type in _BLOCKED_RESOURCE_TYPES:
+        await route.abort()
+    else:
+        await route.continue_()
+
 
 class Orchestrator:
     def __init__(self, settings: Settings = default_settings) -> None:
@@ -28,7 +62,10 @@ class Orchestrator:
         t0 = time.perf_counter()
         logger.info("[%s] starting scrape", query)
         async with async_playwright() as pw:
-            launch_kwargs: dict = {"headless": self.settings.headless}
+            launch_kwargs: dict = {
+                "headless": self.settings.headless,
+                "args": _CHROMIUM_LOW_MEMORY_ARGS,
+            }
             if self.settings.http_proxy:
                 launch_kwargs["proxy"] = {"server": self.settings.http_proxy}
 
@@ -37,7 +74,7 @@ class Orchestrator:
             try:
                 context_kwargs: dict = dict(
                     user_agent=_USER_AGENT,
-                    viewport={"width": 1920, "height": 1080},
+                    viewport={"width": 1280, "height": 720},
                     locale="en-IN",
                     timezone_id="Asia/Kolkata",
                     extra_http_headers={"Accept-Language": "en-IN,en;q=0.9"},
@@ -51,6 +88,9 @@ class Orchestrator:
                 await context.add_init_script(
                     "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
                 )
+                # Block heavy resources we never use (image bytes, fonts, media). The DOM
+                # `src` attributes are still populated by JS, so parsing is unaffected.
+                await context.route("**/*", _block_heavy_resources)
 
                 fetchers = [
                     AmazonScraperFetcher(self.settings, context),
