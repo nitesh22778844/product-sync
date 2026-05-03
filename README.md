@@ -12,13 +12,22 @@ A Python service that scrapes Amazon.in and Flipkart.com for a given search quer
 4. [Installation](#installation)
 5. [Configuration](#configuration)
 6. [Starting and Stopping the Server](#starting-and-stopping-the-server)
-7. [API Reference](#api-reference)
-8. [Caching](#caching)
-9. [Salesforce Integration](#salesforce-integration)
-10. [CLI Usage](#cli-usage)
-11. [Running Tests](#running-tests)
-12. [Docker](#docker)
-13. [Output Schema](#output-schema)
+7. [User Guide — Sending Search Requests](#user-guide--sending-search-requests)
+   - [Search non-grocery products (default)](#search-non-grocery-products-default)
+   - [Search grocery / quick-commerce products](#search-grocery--quick-commerce-products)
+   - [Bypass the cache](#bypass-the-cache)
+   - [Combine flags (e.g. grocery + no_cache)](#combine-flags-eg-grocery--no_cache)
+   - [Browser / Swagger UI](#browser--swagger-ui)
+   - [Postman / REST clients](#postman--rest-clients)
+   - [Python `requests` example](#python-requests-example)
+   - [Where do my results go?](#where-do-my-results-go)
+8. [API Reference](#api-reference)
+9. [Caching](#caching)
+10. [Salesforce Integration](#salesforce-integration)
+11. [CLI Usage](#cli-usage)
+12. [Running Tests](#running-tests)
+13. [Docker](#docker)
+14. [Output Schema](#output-schema)
 
 ---
 
@@ -39,13 +48,14 @@ User → GET /search?q=<query>
          │
          ├── AmazonScraperFetcher.search(query)   ─┐
          │   ├── check cache (get_cached)           │  asyncio.gather
-         │   ├── scrape amazon.in search page       │  runs both
-         │   └── scrape 3 product detail pages      │  concurrently
+         │   ├── set delivery pincode 560094 (once) │  runs both
+         │   ├── scrape amazon.in search page       │  concurrently
+         │   └── scrape 3 product detail pages      │
          │                                           │
          └── FlipkartScraperFetcher.search(query)  ─┘
              ├── check cache (get_cached)
              ├── dismiss login modal (once)
-             ├── fill delivery pincode
+             ├── fill delivery pincode 560094
              ├── scrape flipkart.com search page
              └── scrape 3 product detail pages
          │
@@ -54,7 +64,8 @@ User → GET /search?q=<query>
          │
          ├── return JSON response immediately
          │
-         └── BackgroundTask: SalesforceClient.sync_products(results)
+         └── BackgroundTask: SalesforceClient.sync_products(results, category)
+             ├── category = "grocery" if grocery=true else "non-grocery"
              └── PATCH …/Product__c/Title__c/<title> for each product
                  (upsert: creates on 201, updates on 200/204)
 ```
@@ -78,8 +89,8 @@ product-sync/
 │   ├── cli.py              # typer CLI (python -m product_scraper)
 │   ├── base.py             # Abstract ProductFetcher base class
 │   └── fetchers/
-│       ├── amazon_scraper.py    # Playwright scraper for Amazon.in
-│       └── flipkart_scraper.py  # Playwright scraper for Flipkart.com
+│       ├── amazon_scraper.py    # Playwright scraper for Amazon.in (sets pincode 560094)
+│       └── flipkart_scraper.py  # Playwright scraper for Flipkart.com (sets pincode 560094)
 ├── tests/
 │   ├── conftest.py         # Shared fixtures (mock_settings, cache_settings, etc.)
 │   ├── fixtures/           # Saved HTML snapshots for offline scraper tests
@@ -89,7 +100,8 @@ product-sync/
 │   ├── test_amazon_scraper.py
 │   ├── test_flipkart_scraper.py
 │   ├── test_exporters.py
-│   └── test_orchestrator.py
+│   ├── test_orchestrator.py
+│   └── test_salesforce.py
 ├── Dockerfile
 ├── pyproject.toml
 ├── requirements.txt        # Flat pin list for Docker builds
@@ -211,6 +223,130 @@ curl http://localhost:8080/health
 
 ---
 
+## User Guide — Sending Search Requests
+
+Once the server is running, you trigger a search by hitting `GET /search` with a `q=<your query>` parameter. Two optional flags change *what* gets searched and *whether the cache is used*:
+
+| Flag | Effect |
+|---|---|
+| `grocery=true` | Switches both sites to their **quick-commerce / grocery** layouts (Amazon Fresh + Flipkart Minutes). Results are tagged `Category__c = "grocery"` in Salesforce. |
+| `no_cache=true` | Forces a live scrape, ignoring any same-day cached result. |
+
+If you omit both flags you get the default behaviour: regular Amazon.in + regular Flipkart.com marketplace, served from cache when possible, tagged `Category__c = "non-grocery"` in Salesforce.
+
+> **Heads up — delivery location.** Both sites are forced to deliver to pincode `560094` (Bangalore) on every run, so prices, stock, and Flipkart Minutes coverage are consistent. Change the `DELIVERY_PINCODE` constant in each fetcher if you need a different location.
+
+### Search non-grocery products (default)
+
+Use this for **electronics, books, fashion, household goods, and anything sold on the regular Amazon.in / Flipkart.com marketplaces**.
+
+```bash
+# curl — Linux / macOS / Windows (Git Bash, PowerShell, cmd)
+curl "http://localhost:8000/search?q=HP+laptop+16GB+RAM"
+
+# A few more examples
+curl "http://localhost:8000/search?q=Sony+WH-1000XM5"
+curl "http://localhost:8000/search?q=iPhone+15"
+curl "http://localhost:8000/search?q=Dell+XPS+13"
+```
+
+What happens:
+1. `Category__c = "non-grocery"` is stamped on every Salesforce record.
+2. Amazon URL: `https://www.amazon.in/s?k=<query>`
+3. Flipkart URL: `https://www.flipkart.com/search?q=<query>` (regular marketplace)
+4. Up to 3 products from each site are returned (6 total).
+
+### Search grocery / quick-commerce products
+
+Use this for **groceries, fresh produce, daily essentials, snacks, and anything sold via Amazon Fresh / Flipkart Minutes (HYPERLOCAL)**.
+
+```bash
+curl "http://localhost:8000/search?q=milk&grocery=true"
+curl "http://localhost:8000/search?q=bread&grocery=true"
+curl "http://localhost:8000/search?q=basmati+rice&grocery=true"
+curl "http://localhost:8000/search?q=eggs&grocery=true"
+```
+
+What happens:
+1. `Category__c = "grocery"` is stamped on every Salesforce record.
+2. Amazon URL gets `&i=nowstore` appended (Amazon Fresh / Quick Commerce):
+   `https://www.amazon.in/s?k=<query>&i=nowstore`
+3. Flipkart routes through **Flipkart Minutes** (the HYPERLOCAL quick-commerce app):
+   `https://www.flipkart.com/search?q=<query>&marketplace=HYPERLOCAL&...`
+4. The browser context is granted geolocation permission (Bangalore: `13.0358, 77.5970`) and the on-page "Use my current location" CTA is auto-clicked, otherwise Flipkart Minutes won't render any products.
+5. Grocery product pages don't have spec tables — `specifications` will usually be `null`.
+
+### Bypass the cache
+
+By default each `(source, query)` pair is cached for the rest of the day. To force a fresh scrape:
+
+```bash
+curl "http://localhost:8000/search?q=pendrive&no_cache=true"
+```
+
+### Combine flags (e.g. grocery + no_cache)
+
+```bash
+# Live grocery scrape — no cached result will be served
+curl "http://localhost:8000/search?q=apples&grocery=true&no_cache=true"
+```
+
+### Browser / Swagger UI
+
+Open these URLs directly in your browser — no extra tooling needed:
+
+```
+http://localhost:8000/search?q=Sony+headphones
+http://localhost:8000/search?q=milk&grocery=true
+http://localhost:8000/search?q=apples&grocery=true&no_cache=true
+http://localhost:8000/docs
+```
+
+`/docs` is a fully interactive Swagger UI: fill in `q`, toggle `grocery` / `no_cache`, click **Execute**, and you'll see the constructed request URL, the response, and curl equivalent.
+
+### Postman / REST clients
+
+- **Method:** `GET`
+- **URL:** `http://localhost:8000/search`
+- **Query params:**
+  - `q` — your search query *(required)*
+  - `grocery` — `true` for quick-commerce search *(optional)*
+  - `no_cache` — `true` to bypass the cache *(optional)*
+- **Headers:** none required.
+- **Body:** none.
+
+### Python `requests` example
+
+```python
+import requests
+
+# Non-grocery
+r = requests.get("http://localhost:8000/search", params={"q": "HP laptop 16GB RAM"})
+print(r.json())
+
+# Grocery
+r = requests.get("http://localhost:8000/search", params={"q": "milk", "grocery": "true"})
+print(r.json())
+
+# Force live scrape
+r = requests.get(
+    "http://localhost:8000/search",
+    params={"q": "apples", "grocery": "true", "no_cache": "true"},
+)
+print(r.json())
+```
+
+### Where do my results go?
+
+Every successful `/search` does **two** things:
+
+1. **Returns the JSON response** to you immediately (3 Amazon + 3 Flipkart products in a single payload — see [Output Schema](#output-schema)).
+2. **Fires a background task** that upserts each product into Salesforce `Product__c`. The HTTP response is never delayed by this sync — it runs after the response is sent. Each upserted record carries `Category__c = "grocery"` (when you used `grocery=true`) or `"non-grocery"` (the default), so you can filter by request type in Salesforce reports.
+
+Salesforce sync is **automatic only when** all four `SF_*` env variables are set (see [Configuration](#configuration)). If they're blank, the API still returns scrape results — Salesforce sync is silently skipped.
+
+---
+
 ## API Reference
 
 Base URL: `http://localhost:8080`
@@ -231,6 +367,7 @@ Search Amazon.in and Flipkart.com and return up to 6 products (3 per site).
 |---|---|---|
 | `q` | Yes | Search query (minimum 1 character) |
 | `no_cache` | No | `true` to skip cache and force a live scrape |
+| `grocery` | No | `true` to search Amazon Fresh + Flipkart Minutes (quick-commerce). Records are tagged `Category__c = "grocery"` in Salesforce; otherwise `"non-grocery"` |
 
 **Examples**
 
@@ -240,7 +377,12 @@ curl "http://localhost:8080/search?q=HP+laptop+16GB+RAM"
 
 # Force live scrape, bypass cache
 curl "http://localhost:8080/search?q=pendrive&no_cache=true"
+
+# Grocery / quick-commerce search
+curl "http://localhost:8080/search?q=milk&grocery=true"
 ```
+
+> **Delivery location** — both scrapers set the delivery pincode to `560094` (Bangalore) on first request so prices, stock, and Flipkart Minutes coverage match a single location. Change the constant `DELIVERY_PINCODE` in each fetcher to use a different pincode.
 
 **Response**
 
@@ -382,7 +524,7 @@ Titles longer than 200 characters are trimmed before being used as the key or st
 | `title[:200]` | `Title__c` | External ID — in URL, not body |
 | `source` | `Source__c` | `"amazon"` or `"flipkart"` |
 | `rank` | `Rank__c` | 1–3 |
-| `product_url` | `Product_URL__c` | Query string stripped (fits 255-char Text) |
+| `product_url` | `Product_URL__c` | Full URL stored as-is — make this **URL** or **Long Text Area**, not Text(255), or longer URLs will be rejected |
 | `brand` | `Brand__c` | |
 | `model` | `Model__c` | |
 | `current_price.amount` | `Current_Price__c` | INR amount (Number) |
@@ -394,6 +536,7 @@ Titles longer than 200 characters are trimmed before being used as the key or st
 | `image_url` | `Image_URL__c` | |
 | `availability` | `Availability__c` | |
 | `scraped_at` | `Scraped_At__c` | ISO 8601 string (DateTime field) |
+| _(query-derived)_ | `Category__c` | `"grocery"` if request had `grocery=true`, else `"non-grocery"` (Text or Picklist) |
 
 ---
 

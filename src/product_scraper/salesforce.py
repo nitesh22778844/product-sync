@@ -5,7 +5,7 @@ import logging
 import re
 import time
 from typing import Any, Optional
-from urllib.parse import quote, urlparse, urlunparse
+from urllib.parse import quote
 
 import httpx
 
@@ -17,12 +17,6 @@ logger = logging.getLogger(__name__)
 _TOKEN_EXPIRY_BUFFER = 60  # refresh token this many seconds before it expires
 
 
-def _clean_url(url: str) -> str:
-    """Strip query string and fragment so the URL fits in a 255-char SF Text field."""
-    parsed = urlparse(url)
-    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
-
-
 def _parse_discount_pct(discount: Optional[str]) -> Optional[float]:
     """Extract numeric percentage from strings like '21% off' for SF Percent fields."""
     if not discount:
@@ -31,12 +25,12 @@ def _parse_discount_pct(discount: Optional[str]) -> Optional[float]:
     return float(m.group(1)) if m else None
 
 
-def _build_payload(product: Product) -> dict[str, Any]:
+def _build_payload(product: Product, category: str) -> dict[str, Any]:
     return {
         "Title__c": product.title[:200],  # trimmed to 200 before upsert key comparison
         "Source__c": product.source,
         "Rank__c": product.rank,
-        "Product_URL__c": _clean_url(product.product_url),
+        "Product_URL__c": product.product_url,
         "Brand__c": product.brand,
         "Model__c": product.model,
         "Current_Price__c": product.current_price.amount if product.current_price else None,
@@ -48,6 +42,7 @@ def _build_payload(product: Product) -> dict[str, Any]:
         "Image_URL__c": product.image_url,
         "Availability__c": product.availability,
         "Scraped_At__c": product.scraped_at.isoformat(),
+        "Category__c": category,
     }
 
 
@@ -83,7 +78,7 @@ class SalesforceClient:
         logger.debug("Salesforce token obtained (expires_in=%ds)", expires_in)
         return self._access_token
 
-    async def sync_products(self, products: list[Product]) -> None:
+    async def sync_products(self, products: list[Product], category: str) -> None:
         if not products:
             return
         try:
@@ -107,7 +102,7 @@ class SalesforceClient:
         async with httpx.AsyncClient(timeout=20) as client:
             for product in products:
                 try:
-                    body = _build_payload(product)
+                    body = _build_payload(product, category)
                     title = body.pop("Title__c")  # external ID goes in URL, not body
                     upsert_url = f"{base}/Title__c/{quote(title, safe='')}"
                     resp = await client.patch(upsert_url, json=body, headers=headers)

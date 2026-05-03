@@ -10,7 +10,7 @@ from product_scraper.config import Settings
 from product_scraper.models import Price, Product
 from urllib.parse import quote
 
-from product_scraper.salesforce import SalesforceClient, _build_payload, _clean_url, _parse_discount_pct
+from product_scraper.salesforce import SalesforceClient, _build_payload, _parse_discount_pct
 
 
 @pytest.fixture(scope="module")
@@ -51,7 +51,7 @@ def product() -> Product:
 # ---------------------------------------------------------------------------
 
 def test_payload_maps_all_fields(product):
-    p = _build_payload(product)
+    p = _build_payload(product, "non-grocery")
     assert p["Title__c"] == product.title  # title is short enough here
     assert len(p["Title__c"]) <= 200
     assert p["Source__c"] == "amazon"
@@ -63,11 +63,17 @@ def test_payload_maps_all_fields(product):
     assert p["Review_Count__c"] == 320
     assert '"Color"' in p["Specifications__c"]
     assert p["Availability__c"] == "In Stock"
-    assert "?" not in p["Product_URL__c"]
+    assert p["Product_URL__c"] == product.product_url
+    assert p["Category__c"] == "non-grocery"
+
+
+def test_payload_category_grocery(product):
+    p = _build_payload(product, "grocery")
+    assert p["Category__c"] == "grocery"
 
 
 def test_payload_nulls_for_missing_fields():
-    p = _build_payload(Product(source="flipkart", rank=2, title="Bare", product_url="https://flipkart.com/p/x"))
+    p = _build_payload(Product(source="flipkart", rank=2, title="Bare", product_url="https://flipkart.com/p/x"), "non-grocery")
     assert p["Current_Price__c"] is None
     assert p["Original_Price__c"] is None
     assert p["Discount__c"] is None
@@ -76,14 +82,8 @@ def test_payload_nulls_for_missing_fields():
 
 def test_title_truncated_to_200():
     long_title = "A" * 250
-    p = _build_payload(Product(source="flipkart", rank=1, title=long_title, product_url="https://flipkart.com/p/x"))
+    p = _build_payload(Product(source="flipkart", rank=1, title=long_title, product_url="https://flipkart.com/p/x"), "non-grocery")
     assert p["Title__c"] == "A" * 200
-
-
-def test_clean_url_strips_query_and_fragment():
-    long_url = "https://www.amazon.in/dp/B0DZDX3JF4/ref=sr_1_3?dib=abc123&tag=foo#section"
-    assert _clean_url(long_url) == "https://www.amazon.in/dp/B0DZDX3JF4/ref=sr_1_3"
-    assert len(_clean_url(long_url)) < 255
 
 
 def test_parse_discount_pct():
@@ -111,7 +111,7 @@ async def test_get_token(sf_client):
 @pytest.mark.asyncio
 async def test_push_product(sf_settings, sf_client, product):
     token = await sf_client._get_token()
-    payload = _build_payload(product)
+    payload = _build_payload(product, "non-grocery")
     title = payload.pop("Title__c")  # external ID goes in URL
     upsert_url = f"{sf_settings.sf_api_endpoint.rstrip('/')}/Title__c/{quote(title, safe='')}"
 

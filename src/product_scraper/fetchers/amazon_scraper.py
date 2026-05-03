@@ -17,6 +17,7 @@ from product_scraper.models import Price, Product
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://www.amazon.in"
+DELIVERY_PINCODE = "560094"
 
 # Spec table selector candidates tried in order
 _SPEC_TABLE_SELECTORS = [
@@ -41,6 +42,7 @@ class AmazonScraperFetcher(ProductFetcher):
     def __init__(self, settings: Settings, context: BrowserContext) -> None:
         self.settings = settings
         self.context = context
+        self._pincode_set = False
 
     async def search(self, query: str, limit: int = 3) -> list[Product]:
         cached = get_cached(self.source, query, self.settings)
@@ -49,6 +51,7 @@ class AmazonScraperFetcher(ProductFetcher):
             return [Product(**d) for d in cached]
 
         logger.info("[amazon] cache miss for %r — fetching live", query)
+        await self._ensure_delivery_pincode()
         store = "nowstore" if self.settings.grocery_mode else None
         url = f"{BASE_URL}/s?k={quote_plus(query)}" + (f"&i={store}" if store else "")
         logger.info("[amazon] fetching search page: %s", url)
@@ -213,6 +216,122 @@ class AmazonScraperFetcher(ProductFetcher):
             "availability": availability,
             "brand": brand,
         }
+
+    # ------------------------------------------------------------------
+    # Delivery pincode
+    # ------------------------------------------------------------------
+
+    async def _ensure_delivery_pincode(self) -> None:
+        if self._pincode_set:
+            return
+        page: Optional[Page] = None
+        try:
+            page = await self.context.new_page()
+            await page.goto(BASE_URL, wait_until="domcontentloaded", timeout=30_000)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=8_000)
+            except PlaywrightTimeoutError:
+                pass
+
+            # Always click the top-left "Deliver to" location section, even if Amazon already
+            # shows a default location. Try multiple selectors and fall back to a forced click.
+            location_link_selectors = (
+                "#nav-global-location-popover-link",
+                "#glow-ingress-block",
+                "a[data-csa-c-content-id*='nav_cs_location']",
+                "#nav-global-location-data-modal-action",
+            )
+            opened = False
+            for sel in location_link_selectors:
+                loc = page.locator(sel).first
+                try:
+                    await loc.wait_for(state="attached", timeout=3_000)
+                except PlaywrightTimeoutError:
+                    continue
+                for force in (False, True):
+                    try:
+                        await loc.click(timeout=4_000, force=force)
+                        opened = True
+                        break
+                    except PlaywrightTimeoutError:
+                        continue
+                if opened:
+                    logger.info("[amazon] opened location popover via selector: %s", sel)
+                    break
+
+            if not opened:
+                # Last resort — JS click on the most common id
+                try:
+                    await page.evaluate(
+                        "document.querySelector('#nav-global-location-popover-link')?.click()"
+                    )
+                    opened = True
+                    logger.info("[amazon] opened location popover via JS click fallback")
+                except Exception as exc:
+                    logger.warning("[amazon] could not open location popover: %s", exc)
+                    return
+
+            # Wait for the pincode input
+            try:
+                await page.wait_for_selector("#GLUXZipUpdateInput", state="visible", timeout=10_000)
+            except PlaywrightTimeoutError:
+                logger.warning("[amazon] pincode input did not appear — popover may have failed to render")
+                return
+
+            # Always overwrite, even if the input is pre-filled with a different pincode
+            logger.info("[amazon] filling pincode: %s", DELIVERY_PINCODE)
+            await page.fill("#GLUXZipUpdateInput", "")
+            await page.fill("#GLUXZipUpdateInput", DELIVERY_PINCODE)
+
+            # Click Apply (visible button is #GLUXZipUpdate-announce; #GLUXZipUpdate is the wrapper)
+            clicked = False
+            for sel in ("#GLUXZipUpdate-announce", "#GLUXZipUpdate input[type='submit']", "#GLUXZipUpdate"):
+                try:
+                    await page.locator(sel).first.click(timeout=3_000)
+                    clicked = True
+                    break
+                except PlaywrightTimeoutError:
+                    continue
+            if not clicked:
+                await page.keyboard.press("Enter")
+
+            # Wait for the AJAX update — popover input should disappear / be replaced
+            try:
+                await page.wait_for_selector("#GLUXZipUpdateInput", state="hidden", timeout=8_000)
+            except PlaywrightTimeoutError:
+                logger.debug("[amazon] popover did not close on its own; continuing")
+
+            # Click "Done" / "Continue" on the confirmation popover if present
+            for sel in ("button[name='glowDoneButton']", "#GLUXConfirmClose", "input[name='glowDoneButton']"):
+                try:
+                    await page.locator(sel).first.click(timeout=2_000)
+                    break
+                except PlaywrightTimeoutError:
+                    continue
+
+            # Reload so the new location cookies are reflected in the rendered indicator
+            await page.reload(wait_until="domcontentloaded")
+
+            # Verify — the header reflects the active delivery pincode
+            try:
+                location_text = await page.locator("#glow-ingress-line2").first.text_content(timeout=5_000)
+                location_text = (location_text or "").strip()
+                logger.info("[amazon] location indicator: %r", location_text)
+                if DELIVERY_PINCODE in location_text:
+                    logger.info("[amazon] pincode %s confirmed applied", DELIVERY_PINCODE)
+                else:
+                    logger.warning(
+                        "[amazon] pincode %s not reflected in location indicator (%r) — search may use a different location",
+                        DELIVERY_PINCODE, location_text,
+                    )
+            except PlaywrightTimeoutError:
+                logger.warning("[amazon] could not read location indicator after pincode submit")
+            self._pincode_set = True
+        except Exception as exc:
+            logger.warning("[amazon] failed to set delivery pincode: %s", exc)
+        finally:
+            if page:
+                await page.close()
 
     # ------------------------------------------------------------------
     # HTTP layer

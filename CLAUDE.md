@@ -2,91 +2,19 @@
 
 ## Project Overview
 
-A Python-based product information aggregator that searches Amazon.in and Flipkart.com, returning the top 3 results from each (6 total rows) as structured JSON/CSV.
+Python-based product information aggregator. Searches Amazon.in and Flipkart.com via Playwright scraping, returns top 3 results from each (6 rows) as structured JSON, and optionally upserts them to a Salesforce `Product__c` object.
 
-**Primary use case:** Given a query like "HP laptop with 16GB RAM", return 6 rows of comparable product data side-by-side.
-
-## API Status (as of May 2026)
-
-- **Amazon PA-API 5.0** — shut down May 15 2026; no new signups. `fetchers/amazon_api.py` is a stub that raises `APIUnavailableError`.
-- **Flipkart Affiliate API** — closed to new signups. No public product search API exists.
-
-Both fetchers use Playwright scraping. The `ProductFetcher` abstract base class keeps the interface extensible if APIs become available later.
+The Amazon PA-API and Flipkart Affiliate API are both closed to new signups, so both fetchers use Playwright. The `ProductFetcher` abstract base class keeps the interface extensible if APIs reopen.
 
 ## Tech Stack
 
 - **Python 3.10+**, asyncio
 - **Playwright** — headless Chromium with stealth setup
 - **BeautifulSoup4 + lxml** — HTML parsing
-- **Pydantic v2** — structured models with field validators
-- **pydantic-settings** — env-based config
-- **pandas** — CSV export
-- **typer** — CLI
-- **python-dotenv** — `.env` loading
-- **FastAPI + uvicorn** — REST API server
-- **httpx** — async HTTP client (Salesforce REST calls)
-
-## Project Structure
-
-```
-.
-├── CLAUDE.md
-├── README.md
-├── pyproject.toml
-├── requirements.txt               # Flat pin list for Docker — kept in sync with pyproject.toml
-├── Dockerfile                     # python:3.12-slim + Playwright Chromium
-├── .env.example
-├── .env                           # Local secrets — never commit
-├── .gitignore
-├── src/
-│   └── product_scraper/
-│       ├── __init__.py
-│       ├── __main__.py            # python -m product_scraper entry point
-│       ├── models.py              # Price, Product, SearchResult
-│       ├── config.py              # Settings (pydantic-settings) incl. Salesforce vars
-│       ├── base.py                # Abstract ProductFetcher
-│       ├── cache.py               # SHA256-keyed JSON file cache (per-request settings aware)
-│       ├── orchestrator.py        # asyncio.gather, shared BrowserContext
-│       ├── exporters.py           # export_json, export_csv, export_jsonl
-│       ├── cli.py                 # typer CLI
-│       ├── api.py                 # FastAPI app — GET /search, GET /health
-│       ├── salesforce.py          # SalesforceClient — OAuth + Product__c upsert sync
-│       └── fetchers/
-│           ├── __init__.py
-│           ├── amazon_api.py      # Stub — raises APIUnavailableError
-│           ├── amazon_scraper.py  # Playwright scraper for Amazon.in
-│           └── flipkart_scraper.py # Playwright scraper for Flipkart.com
-└── tests/
-    ├── conftest.py
-    ├── fixtures/                  # Saved HTML pages for offline tests
-    ├── test_models.py
-    ├── test_amazon_scraper.py
-    ├── test_flipkart_scraper.py
-    ├── test_api.py
-    ├── test_cache.py
-    ├── test_exporters.py
-    └── test_orchestrator.py
-```
-
-## Output Schema
-
-| Field | Type | Notes |
-|---|---|---|
-| source | `"amazon"` \| `"flipkart"` | |
-| rank | int 1–3 | Position in search results |
-| title | str | Full product title |
-| brand | str \| null | Extracted from product page |
-| model | str \| null | |
-| current_price | `{amount, currency}` \| null | |
-| original_price | `{amount, currency}` \| null | MRP before discount |
-| discount | str \| null | e.g. `"21% off"` |
-| rating | float 0–5 \| null | |
-| review_count | int \| null | Handles Indian lakh/K format |
-| specifications | `dict[str, str]` \| null | From product detail page |
-| product_url | str | |
-| image_url | str \| null | |
-| availability | str \| null | |
-| scraped_at | datetime | Auto-stamped |
+- **Pydantic v2** + **pydantic-settings** — models and env-based config
+- **FastAPI + uvicorn** — REST API
+- **httpx** — async HTTP client (Salesforce REST)
+- **typer** — CLI; **pandas** — CSV export
 
 ## Key Implementation Details
 
@@ -98,6 +26,18 @@ Both fetchers share one `BrowserContext` created by `Orchestrator`:
 - 2.5s delay between requests; exponential backoff on failures (3 retries max)
 - CAPTCHA detection: if page title contains "Robot Check" or URL contains "captcha", raise `CaptchaError` immediately — never attempt to bypass
 - On Windows, `WindowsProactorEventLoopPolicy` is set at import time in `api.py` so Playwright subprocess works under uvicorn
+
+### Delivery Pincode (`560094`, Bangalore)
+Both scrapers set the delivery pincode once per fetcher instance to keep prices, availability, and Flipkart Minutes coverage consistent.
+
+- **Amazon** — `_ensure_delivery_pincode` (in `amazon_scraper.py`):
+  1. Navigates to `amazon.in`
+  2. Clicks `#nav-global-location-popover-link` to open the location popover
+  3. Fills `#GLUXZipUpdateInput` with `560094` and submits via `#GLUXZipUpdate` (Enter as fallback)
+  4. Closes the popover via `button[name='glowDoneButton']` / `#GLUXConfirmClose`
+  5. Cookies persist on the shared `BrowserContext` so subsequent product pages inherit the location
+  6. Failures are logged and never abort the search
+- **Flipkart** — `_fill_pincode_if_needed` fills `560094` whenever `input[placeholder*='Pincode']` appears
 
 ### Amazon Selectors (current "puis" layout)
 - Cards: `[data-component-type='s-search-result']`, skip sponsored
@@ -124,7 +64,6 @@ Both fetchers share one `BrowserContext` created by `Orchestrator`:
 - Rating: text node matching `\d\.\d`
 - Spec table (product page): `div._3k-BhJ table tr`, `table._14cfVK tr`, `._2TIQom table tr`
 - Login modal: dismissed once per fetcher instance using multiple selector fallbacks
-- Pin code: fills `560094` if `input[placeholder*='Pincode']` appears
 
 **Flipkart Minutes (`grocery_mode=True`)** — see *Grocery Mode* below for full details
 - Card selector: `a[href*='/p/']` (the link IS the card; no wrapper div)
@@ -151,7 +90,7 @@ re.sub(r"[₹₹RsINR\s]", "", text).replace(",", "")
 When `GET /search?no_cache=true` is received, `api.py` creates a copy of the default settings with `cache_enabled=False` and passes it to `Orchestrator`. This flows through to each fetcher's `get_cached` / `set_cache` calls, ensuring the cache is bypassed for the entire request — both reading and writing.
 
 ### Grocery Mode
-When `GET /search?grocery=true` is received, `api.py` sets `grocery_mode=True` on the request-scoped settings copy. Both fetchers switch to grocery-specific behaviour.
+When `GET /search?grocery=true` is received, `api.py` sets `grocery_mode=True` on the request-scoped settings copy. Both fetchers switch to grocery-specific behaviour, and the Salesforce sync stamps each record's `Category__c` with `"grocery"` (otherwise `"non-grocery"`).
 
 **Amazon** appends `&i=nowstore` → routes to Amazon Fresh / Quick Commerce:
 ```
@@ -187,21 +126,6 @@ Card structure is the same as regular Amazon, but the existing `.a-price .a-offs
 
 Grocery product pages have no spec tables — `specifications` will be `null` for most grocery items.
 
-## REST API
-
-Start the server:
-```bash
-python -m uvicorn product_scraper.api:app --host 0.0.0.0 --port 8000
-```
-
-| Endpoint | Method | Description |
-|---|---|---|
-| `/health` | GET | Health check — returns `{"status": "ok"}` |
-| `/search?q=<query>` | GET | Search products; optional `&no_cache=true`, `&grocery=true` |
-| `/docs` | GET | Swagger UI |
-
-On each `/search` response the API also fires a **background task** that pushes all returned products to the Salesforce `Product__c` object. The HTTP response is returned immediately — Salesforce sync runs independently and never delays or fails the response.
-
 ## Salesforce Integration
 
 ### Configuration (`.env`)
@@ -232,7 +156,7 @@ PATCH …/sobjects/Product__c/Title__c/<url-encoded-title>
 | `title[:200]` | `Title__c` | External ID — used in upsert URL; trimmed to 200 chars |
 | `source` | `Source__c` | `"amazon"` or `"flipkart"` |
 | `rank` | `Rank__c` | 1–3 |
-| `product_url` | `Product_URL__c` | Query string stripped to fit 255-char Text field |
+| `product_url` | `Product_URL__c` | Full URL stored as-is — make this field **URL** or **Long Text Area**, not Text(255) |
 | `brand` | `Brand__c` | |
 | `model` | `Model__c` | |
 | `current_price.amount` | `Current_Price__c` | Numeric INR amount |
@@ -244,27 +168,11 @@ PATCH …/sobjects/Product__c/Title__c/<url-encoded-title>
 | `image_url` | `Image_URL__c` | |
 | `availability` | `Availability__c` | |
 | `scraped_at` | `Scraped_At__c` | ISO 8601 datetime string |
+| _(query-derived)_ | `Category__c` | `"grocery"` when `grocery=true`, else `"non-grocery"` |
+
+`Category__c` is a request-level value (not stored on the `Product` model). `api.py` derives it from the `grocery` query param and passes it to `SalesforceClient.sync_products(products, category)`.
 
 All custom fields must exist on `Product__c` before triggering a search, or Salesforce will reject the record. Per-product errors are logged as warnings and never surface to the API caller.
-
-## CLI Usage
-
-```bash
-# Single query
-python -m product_scraper "HP laptop with 16GB RAM"
-
-# Save to file
-python -m product_scraper "Sony WH-1000XM5" --output results.json
-
-# CSV output
-python -m product_scraper "iPhone 15" --format csv --output results.csv
-
-# Multiple queries from file
-python -m product_scraper --queries-file queries.txt --output batch.json
-
-# Bypass cache
-python -m product_scraper "Dell XPS 13" --no-cache
-```
 
 ## Scraping Rules
 

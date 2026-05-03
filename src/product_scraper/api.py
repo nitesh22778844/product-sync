@@ -82,8 +82,9 @@ async def search(
         result = await orchestrator.run(q)
         logger.info("Search complete: q=%r  results=%d  errors=%s", q, len(result.results), list(result.errors.keys()) or "none")
         if _sf_client and result.results:
-            background_tasks.add_task(_sf_client.sync_products, result.results)
-            logger.info("Salesforce sync queued for %d products (q=%r)", len(result.results), q)
+            category = "grocery" if grocery else "non-grocery"
+            background_tasks.add_task(_sf_client.sync_products, result.results, category)
+            logger.info("Salesforce sync queued for %d products (q=%r category=%s)", len(result.results), q, category)
         return result
     except Exception as exc:
         logger.exception("Orchestrator failed for query %r", q)
